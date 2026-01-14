@@ -1,0 +1,6 @@
+streamlit
+tensorflow-cpu
+pandas
+numpy
+plotly
+pillow
