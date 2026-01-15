@@ -9,6 +9,11 @@ import math
 folder_z_nowymi_zdjeciami = 'test_real'
 sciezka_do_modelu = 'moj_model_fer.h5'
 
+# USTAWIENIA WYŚWIETLANIA
+KOLUMNY = 4
+WIERSZE_NA_STRONE = 3  # Ile rzędów na jednym ekranie
+ZDJEC_NA_STRONE = KOLUMNY * WIERSZE_NA_STRONE  # Np. 12 zdjęć na okno
+
 klasy_ang = ['angry', 'happy', 'sad']
 tlumaczenie = {'angry': 'ZŁOŚĆ', 'happy': 'RADOŚĆ', 'sad': 'SMUTEK'}
 
@@ -18,9 +23,17 @@ if not os.path.exists(sciezka_do_modelu):
     exit()
 
 print("Ładowanie modelu...")
-model = tf.keras.models.load_model(sciezka_do_modelu)
+try:
+    model = tf.keras.models.load_model(sciezka_do_modelu)
+except Exception as e:
+    print(f"Błąd ładowania modelu: {e}")
+    exit()
 
 # --- 2. Pobieranie plików ---
+if not os.path.exists(folder_z_nowymi_zdjeciami):
+    print(f"Brak folderu {folder_z_nowymi_zdjeciami}")
+    exit()
+
 pliki = os.listdir(folder_z_nowymi_zdjeciami)
 zdjecia = [f for f in pliki if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
 
@@ -28,65 +41,77 @@ if not zdjecia:
     print("Folder pusty!")
     exit()
 
-print(f"Testowanie {len(zdjecia)} zdjęć...")
+print(f"Znaleziono {len(zdjecia)} zdjęć. Rozpoczynam testowanie...")
 
-# --- 3. Przygotowanie siatki wykresów ---
-cols = 4
-rows = math.ceil(len(zdjecia) / cols)
-plt.figure(figsize=(16, 5 * rows))
+# --- 3. Pętla Paginacji (Wyświetlanie stronami) ---
+total_images = len(zdjecia)
+num_pages = math.ceil(total_images / ZDJEC_NA_STRONE)
 
-# --- 4. Pętla przez zdjęcia ---
-for i, plik in enumerate(zdjecia):
-    sciezka = os.path.join(folder_z_nowymi_zdjeciami, plik)
+for page in range(num_pages):
+    start_idx = page * ZDJEC_NA_STRONE
+    end_idx = min((page + 1) * ZDJEC_NA_STRONE, total_images)
+    batch_zdjecia = zdjecia[start_idx:end_idx]
 
-    try:
-        # KROK A: Ładujemy oryginał do wyświetlenia (KOLOROWY, DUŻY)
-        img_display = load_img(sciezka)
+    print(f"\n--- Strona {page + 1} z {num_pages} (Zdjęcia {start_idx + 1}-{end_idx}) ---")
 
-        # KROK B: Ładujemy wersję dla SIECI (SZARY, 48x48)
-        # load_img zrobi resize i grayscale automatycznie w locie
-        img_for_ai = load_img(sciezka, color_mode='grayscale', target_size=(48, 48))
+    # Obliczamy ile rzędów potrzeba na TEJ konkretnej stronie
+    current_batch_size = len(batch_zdjecia)
+    current_rows = math.ceil(current_batch_size / KOLUMNY)
 
-        # Preprocessing dla AI
-        img_array = img_to_array(img_for_ai)
-        img_array /= 255.0
-        img_batch = np.expand_dims(img_array, axis=0)
+    # Ustawiamy rozmiar okna (wysokość zależy od liczby rzędów)
+    plt.figure(figsize=(16, 5 * current_rows))
+    plt.suptitle(f"Wyniki - Strona {page + 1} / {num_pages}", fontsize=20)
 
-        # KROK C: Predykcja
-        prediction = model.predict(img_batch, verbose=0)
-        idx = np.argmax(prediction)
-        etykieta = tlumaczenie[klasy_ang[idx]]
-        pewnosc = np.max(prediction) * 100
+    for i, plik in enumerate(batch_zdjecia):
+        sciezka = os.path.join(folder_z_nowymi_zdjeciami, plik)
 
-        # Kolorki napisów
-        kolor_txt = 'black'
-        bg_color = 'white'
-        if klasy_ang[idx] == 'happy':
-            kolor_txt = 'darkgreen'
-            bg_color = '#e6fffa'  # Jasny zielony tło
-        elif klasy_ang[idx] == 'angry':
-            kolor_txt = 'darkred'
-            bg_color = '#ffe6e6'  # Jasny czerwony tło
-        elif klasy_ang[idx] == 'sad':
-            kolor_txt = 'darkblue'
-            bg_color = '#e6f0ff'  # Jasny niebieski tło
+        try:
+            # KROK A: Ładujemy oryginał (KOLOR)
+            img_display = load_img(sciezka)
 
-        # KROK D: Wyświetlanie
-        ax = plt.subplot(rows, cols, i + 1)
+            # KROK B: Ładujemy wersję dla AI (GRAYSCALE, 48x48)
+            img_for_ai = load_img(sciezka, color_mode='grayscale', target_size=(48, 48))
 
-        # Wyświetlamy ładne, kolorowe zdjęcie
-        plt.imshow(img_display)
+            # Preprocessing
+            img_array = img_to_array(img_for_ai)
+            img_array /= 255.0
+            img_batch = np.expand_dims(img_array, axis=0)
 
-        # Tytuł z wynikiem
-        plt.title(f"{etykieta}\n({pewnosc:.1f}%)",
-                  color=kolor_txt, fontsize=14, fontweight='bold',
-                  bbox=dict(facecolor=bg_color, edgecolor='none', alpha=0.7))
+            # KROK C: Predykcja
+            prediction = model.predict(img_batch, verbose=0)
+            idx = np.argmax(prediction)
+            etykieta = tlumaczenie[klasy_ang[idx]]
+            pewnosc = np.max(prediction) * 100
 
-        plt.axis('off')
-        print(f"Zdjęcie: {plik} -> {etykieta}")
+            # Kolory
+            kolor_txt = 'black'
+            bg_color = 'white'
+            if klasy_ang[idx] == 'happy':
+                kolor_txt = 'darkgreen'
+                bg_color = '#e6fffa'
+            elif klasy_ang[idx] == 'angry':
+                kolor_txt = 'darkred'
+                bg_color = '#ffe6e6'
+            elif klasy_ang[idx] == 'sad':
+                kolor_txt = 'darkblue'
+                bg_color = '#e6f0ff'
 
-    except Exception as e:
-        print(f"Błąd pliku {plik}: {e}")
+            # KROK D: Wyświetlanie
+            ax = plt.subplot(current_rows, KOLUMNY, i + 1)
+            plt.imshow(img_display)
 
-plt.tight_layout()
-plt.show()
+            plt.title(f"{etykieta}\n({pewnosc:.1f}%)",
+                      color=kolor_txt, fontsize=14, fontweight='bold',
+                      bbox=dict(facecolor=bg_color, edgecolor='none', alpha=0.7))
+            plt.axis('off')
+
+            print(f"[{i + 1}/{current_batch_size}] {plik} -> {etykieta}")
+
+        except Exception as e:
+            print(f"Błąd przy pliku {plik}: {e}")
+
+    plt.tight_layout()
+    print("Wyświetlam okno wykresu. ZAMKNIJ JE, ABY ZOBACZYĆ NASTĘPNĄ STRONĘ.")
+    plt.show()
+
+print("\n--- Koniec przeglądania ---")
