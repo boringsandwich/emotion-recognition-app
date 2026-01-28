@@ -245,11 +245,18 @@ elif app_mode == "📹 Kamera (DeepFace - Live/Foto)":
     if method == "🔴 Live Stream (Wideo)":
         st.write("Kliknij **START**, aby uruchomić kamerę. Zezwól przeglądarce na dostęp.")
 
-        # To jest ten komponent, który działa w chmurze!
+        # To jest poprawiony fragment w sekcji: elif app_mode == "📹 Kamera (DeepFace - Live/Foto)":
+
+        # Definicja serwerów STUN (niezbędne, aby obraz przeszedł przez sieć w chmurze)
+        RTC_CONFIGURATION = {
+            "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+        }
+
         webrtc_streamer(
             key="emotion-filter",
             mode=WebRtcMode.SENDRECV,
             video_processor_factory=EmotionProcessor,
+            rtc_configuration=RTC_CONFIGURATION,  # <--- DODANO TO
             media_stream_constraints={"video": True, "audio": False},
             async_processing=True
         )
