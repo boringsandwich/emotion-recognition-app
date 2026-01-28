@@ -6,7 +6,6 @@ import plotly.graph_objects as go
 import os
 import random
 import glob
-import cv2  # Do kamery
 from PIL import Image
 
 # Importy do Twojego modelu (TensorFlow)
@@ -17,7 +16,7 @@ from tensorflow.keras.preprocessing.image import load_img, img_to_array
 from deepface import DeepFace
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="System Analizy Emocji (Hybrydowy)", layout="wide")
+st.set_page_config(page_title="System Analizy Emocji", layout="wide")
 
 # ==========================================
 # KONFIGURACJA 1: TWÓJ MODEL (BADANIA)
@@ -33,14 +32,17 @@ COLORS = {'angry': '#FF4B4B', 'happy': '#2ECC71', 'sad': '#3498DB'}
 # ==========================================
 # KONFIGURACJA 2: KAMERA (DEEPFACE)
 # ==========================================
-DEEPFACE_TRANSLATION = {
-    'angry': 'ZLOSC', 'disgust': 'OBRZYDZENIE', 'fear': 'STRACH',
-    'happy': 'RADOSC', 'sad': 'SMUTEK', 'surprise': 'ZASKOCZENIE', 'neutral': 'NEUTRALNY'
+# Tutaj definiujemy TYLKO te emocje, które nas interesują
+TARGET_EMOTIONS = {
+    'angry': 'ZŁOŚĆ',
+    'happy': 'RADOŚĆ',
+    'sad': 'SMUTEK'
 }
-# Kolory BGR dla OpenCV
-DEEPFACE_COLORS = {
-    'ZLOSC': (0, 0, 255), 'RADOSC': (0, 255, 0), 'SMUTEK': (255, 0, 0),
-    'NEUTRALNY': (200, 200, 200), 'ZASKOCZENIE': (0, 255, 255)
+# Kolory dla wykresów w trybie DeepFace
+DEEPFACE_COLORS_HEX = {
+    'ZŁOŚĆ': '#FF4B4B',
+    'RADOŚĆ': '#2ECC71',
+    'SMUTEK': '#3498DB'
 }
 
 
@@ -80,15 +82,15 @@ def get_dataset_images(limit=None):
 st.sidebar.title("🎛️ Panel Sterowania")
 app_mode = st.sidebar.selectbox(
     "Wybierz tryb aplikacji:",
-    ["📂 Badanie (Mój Model - Oryginał)", "📹 Kamera (Live/Foto - DeepFace)"]
+    ["📂 Badanie (Mój Model - Oryginał)", "📷 Kamera (Live Foto - DeepFace)"]
 )
 
 # ---------------------------------------------------------
-# TRYB 1: BADANIE (To jest Twój stary kod w 100%)
+# TRYB 1: BADANIE (To jest Twój stary kod)
 # ---------------------------------------------------------
 if app_mode == "📂 Badanie (Mój Model - Oryginał)":
 
-    st.title("🧠 Inteligentny System Rozpoznawania Emocji (Twój Model)")
+    st.title("🧠 System Rozpoznawania Emocji (Twój Model)")
 
     # 1. Ładowanie Modelu
     model = load_ai_model()
@@ -97,7 +99,7 @@ if app_mode == "📂 Badanie (Mój Model - Oryginał)":
         st.error(f"Nie znaleziono modelu '{MODEL_PATH}'. Uruchom najpierw trening (emotion.py)!")
         st.stop()
 
-    st.sidebar.header("⚙️ Źródło Danych (Badanie)")
+    st.sidebar.header("⚙️ Źródło Danych")
     source_option = st.sidebar.radio(
         "Skąd pobrać zdjęcia?",
         ("📂 Własny folder (test_real)", "📚 Zbiór testowy (Dataset)")
@@ -106,7 +108,7 @@ if app_mode == "📂 Badanie (Mój Model - Oryginał)":
     image_paths = []
     current_source_name = ""
 
-    # Logika wyboru plików (jak w oryginale)
+    # Logika wyboru plików
     if source_option == "📂 Własny folder (test_real)":
         folder_path = st.sidebar.text_input("Ścieżka do folderu:", value=DEFAULT_USER_FOLDER)
         current_source_name = "Moje zdjęcia"
@@ -134,7 +136,7 @@ if app_mode == "📂 Badanie (Mój Model - Oryginał)":
         st.warning("Brak zdjęć do analizy.")
         st.stop()
 
-    # --- ANALIZA DANYCH (Zachowana logika sesji) ---
+    # --- ANALIZA DANYCH ---
     session_key = f'analysis_{current_source_name}_{len(image_paths)}'
 
     if session_key not in st.session_state:
@@ -186,7 +188,7 @@ if app_mode == "📂 Badanie (Mój Model - Oryginał)":
     df = st.session_state[session_key]
     has_gt = st.session_state.get(f"{session_key}_has_gt", False)
 
-    # --- ZAKŁADKI (Zachowane w 100%) ---
+    # --- ZAKŁADKI ---
     tab1, tab2, tab3 = st.tabs(["📊 Raporty i Statystyki", "🔍 Przeglądarka (Interakcja)", "🧮 Wnioskowanie Bayesowskie"])
 
     # TAB 1: RAPORTY
@@ -215,7 +217,6 @@ if app_mode == "📂 Badanie (Mój Model - Oryginał)":
     # TAB 2: PRZEGLĄDARKA
     with tab2:
         st.header("Interaktywna Przeglądarka")
-        # Sortowanie: Najpierw poprawne, potem pewność
         df_sorted = df.sort_values(by=['Poprawne', 'Pewność'], ascending=[False, False], na_position='last')
 
         c1, c2 = st.columns(2)
@@ -231,10 +232,8 @@ if app_mode == "📂 Badanie (Mój Model - Oryginał)":
         for index, row in filtered_df.iterrows():
             with cols[index % 5]:
                 st.image(row['Ścieżka'], use_container_width=True)
-                # Kolorowanie wyniku
                 color_style = "green" if row['Poprawne'] else "red"
                 if row['Prawdziwa_Etykieta'] == "-": color_style = "black"
-
                 st.markdown(f"**{row['Wykryta_Emocja']}** ({row['Pewność']:.0%})", unsafe_allow_html=True)
 
     # TAB 3: BAYES
@@ -265,118 +264,73 @@ if app_mode == "📂 Badanie (Mój Model - Oryginał)":
             fig.add_trace(go.Bar(x=emotions_list, y=likelihood, name='Model (Oczy)'))
             fig.add_trace(go.Bar(x=emotions_list, y=posterior, name='Bayes (Oczy + Kontekst)'))
             st.plotly_chart(fig, use_container_width=True)
-
             st.success(f"Decyzja Bayesa: **{emotions_list[np.argmax(posterior)]}**")
 
 
 # ---------------------------------------------------------
-# TRYB 2: KAMERA (NOWOŚĆ - DeepFace)
+# TRYB 2: KAMERA (NOWOŚĆ - DeepFace) - TYLKO SNAPSHOT
 # ---------------------------------------------------------
-elif app_mode == "📹 Kamera (Live/Foto - DeepFace)":
+elif app_mode == "📷 Kamera (Live Foto - DeepFace)":
 
-    st.title("📹 Detekcja Emocji na Żywo")
-    st.caption("Ten tryb używa silnika **DeepFace** (zewnętrzna biblioteka), aby działać płynnie na obrazie z kamery.")
+    st.title("📷 Kamera (Analiza Emocji)")
+    st.info(
+        "Zrób zdjęcie, aby model DeepFace przeanalizował emocje. Wynik zostanie ograniczony tylko do: Złość, Radość, Smutek.")
 
-    mode_cam = st.radio("Wybierz metodę:", ["🔴 Stream Video", "📸 Pojedyncze Zdjęcie"], horizontal=True)
+    img_buffer = st.camera_input("Uśmiechnij się!")
 
-    # --- PODTRYB: VIDEO LIVE ---
-    if mode_cam == "🔴 Stream Video":
-        col1, col2 = st.columns([3, 1])
+    if img_buffer is not None:
+        # 1. Zapisz zdjęcie tymczasowo
+        temp_filename = "temp_snap.jpg"
+        with open(temp_filename, "wb") as f:
+            f.write(img_buffer.getbuffer())
 
-        with col2:
-            st.markdown("### Sterowanie")
-            run = st.checkbox('🔴 Włącz Kamerę')
-            st.info("System analizuje co 10. klatkę dla płynności.")
-            text_placeholder = st.empty()
+        col_res1, col_res2 = st.columns([1, 1.5])
 
-        with col1:
-            frame_placeholder = st.image([])
+        with col_res1:
+            st.image(temp_filename, caption="Twoje zdjęcie", use_container_width=True)
 
-        if run:
-            # Używamy OpenCV do czytania kamery
-            cap = cv2.VideoCapture(0)
-            # Ładujemy detektor twarzy (szybki)
-            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        with col_res2:
+            with st.spinner("Analiza w toku..."):
+                try:
+                    # DeepFace analizuje zdjęcie (wszystkie emocje)
+                    # enforce_detection=False pozwala działać nawet gdy twarz jest niewyraźna
+                    res = DeepFace.analyze(temp_filename, actions=['emotion'], enforce_detection=False)
 
-            frame_count = 0
-            last_emotion = "Analiza..."
-            last_color = (255, 255, 255)
+                    if isinstance(res, list): res = res[0]
 
-            while run:
-                ret, frame = cap.read()
-                if not ret:
-                    st.error("Nie można odczytać kamery.")
-                    break
+                    all_emotions = res['emotion']  # np. {'angry': 10, 'happy': 0.1, 'neutral': 80...}
 
-                # 1. Wykryj twarz (Haar Cascade)
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+                    # 2. FILTROWANIE (Kluczowy moment)
+                    # Wybieramy tylko te 3 emocje, które zdefiniowaliśmy w TARGET_EMOTIONS
+                    filtered_scores = {k: all_emotions.get(k, 0) for k in TARGET_EMOTIONS.keys()}
 
-                for (x, y, w, h) in faces:
-                    # Rysuj ramkę
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), last_color, 2)
+                    # Obliczamy sumę tych trzech, żeby przeliczyć procenty na nowo (żeby sumowały się do 100%)
+                    total_score = sum(filtered_scores.values())
+                    if total_score == 0: total_score = 1  # Zabezpieczenie przez dzieleniem przez 0
 
-                    # 2. Analizuj emocje (DeepFace) co 10 klatek
-                    if frame_count % 10 == 0:
-                        try:
-                            # Wycinamy twarz
-                            face_roi = frame[y:y + h, x:x + w]
-                            # DeepFace robi magię
-                            result = DeepFace.analyze(face_roi, actions=['emotion'], enforce_detection=False)
+                    # Normalizacja
+                    normalized_scores = {k: (v / total_score) for k, v in filtered_scores.items()}
 
-                            # Obsługa wyniku (czasem jest to lista)
-                            if isinstance(result, list): result = result[0]
+                    # Znalezienie zwycięzcy
+                    winner_key = max(normalized_scores, key=normalized_scores.get)
+                    winner_pl = TARGET_EMOTIONS[winner_key]
+                    winner_conf = normalized_scores[winner_key]
 
-                            emo_eng = result['dominant_emotion']
-                            # Tłumaczenie na PL
-                            last_emotion = DEEPFACE_TRANSLATION.get(emo_eng, emo_eng)
-                            # Dobór koloru
-                            last_color = DEEPFACE_COLORS.get(last_emotion, (255, 255, 255))
+                    # Wyświetlenie wyniku
+                    st.success(f"Wykryta emocja: **{winner_pl}**")
+                    st.metric("Pewność (wśród badanych 3)", f"{winner_conf:.1%}")
 
-                            # Wyświetl tekst obok
-                            text_placeholder.markdown(f"## Wykryto: **{last_emotion}**")
+                    # Wykres
+                    chart_data = pd.DataFrame({
+                        'Emocja': [TARGET_EMOTIONS[k] for k in normalized_scores.keys()],
+                        'Prawdopodobienstwo': list(normalized_scores.values())
+                    })
 
-                        except Exception:
-                            pass
+                    fig = px.bar(chart_data, x='Emocja', y='Prawdopodobienstwo',
+                                 title="Rozkład (Złość vs Radość vs Smutek)",
+                                 color='Emocja', color_discrete_map=DEEPFACE_COLORS_HEX)
+                    fig.update_yaxes(range=[0, 1])
+                    st.plotly_chart(fig, use_container_width=True)
 
-                    # Podpisz ramkę
-                    cv2.putText(frame, last_emotion, (x, y - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, last_color, 2)
-
-                # Konwersja BGR -> RGB dla Streamlit
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame_placeholder.image(frame, channels="RGB")
-                frame_count += 1
-
-            cap.release()
-
-    # --- PODTRYB: ZDJĘCIE ---
-    else:
-        st.subheader("Zrób zdjęcie i przeanalizuj")
-        img_buffer = st.camera_input("Uśmiech!")
-
-        if img_buffer is not None:
-            # Zapisz tymczasowo
-            temp_filename = "temp_snap.jpg"
-            with open(temp_filename, "wb") as f:
-                f.write(img_buffer.getbuffer())
-
-            col_res1, col_res2 = st.columns(2)
-            with col_res1:
-                st.image(temp_filename, caption="Twoje zdjęcie")
-
-            with col_res2:
-                with st.spinner("Analiza DeepFace..."):
-                    try:
-                        res = DeepFace.analyze(temp_filename, actions=['emotion'])
-                        if isinstance(res, list): res = res[0]
-
-                        emo = res['dominant_emotion']
-                        emo_pl = DEEPFACE_TRANSLATION.get(emo, emo)
-                        conf = res['emotion'][emo]
-
-                        st.success(f"Emocja: **{emo_pl}**")
-                        st.metric("Pewność", f"{conf:.1f}%")
-                        st.json(res['emotion'])  # Pokaż wszystkie procenty
-                    except Exception as e:
-                        st.error(f"Nie wykryto twarzy. Spróbuj ponownie. ({e})")
+                except Exception as e:
+                    st.error(f"Wystąpił błąd analizy lub nie wykryto twarzy. Spróbuj ponownie.\nSzczegóły: {e}")
