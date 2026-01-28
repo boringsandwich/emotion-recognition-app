@@ -1,5 +1,5 @@
-streamlit>=1.35.0
-tensorflow
+streamlit
+tensorflow-cpu
 deepface
 tf-keras
 opencv-python-headless
@@ -7,3 +7,5 @@ pandas
 numpy
 plotly
 pillow
+streamlit-webrtc
+av

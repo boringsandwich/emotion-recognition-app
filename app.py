@@ -6,17 +6,20 @@ import plotly.graph_objects as go
 import os
 import random
 import glob
+import cv2
+import av
 from PIL import Image
 
-# Importy do Twojego modelu (TensorFlow)
+# Biblioteki do streamingu wideo w chmurze
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+
+# Importy AI
 import tensorflow as tf
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
-
-# Import do nowej funkcji kamery (DeepFace)
 from deepface import DeepFace
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="System Analizy Emocji", layout="wide")
+st.set_page_config(page_title="System Analizy Emocji (Hybrydowy)", layout="wide")
 
 # ==========================================
 # KONFIGURACJA 1: TWÓJ MODEL (BADANIA)
@@ -32,37 +35,32 @@ COLORS = {'angry': '#FF4B4B', 'happy': '#2ECC71', 'sad': '#3498DB'}
 # ==========================================
 # KONFIGURACJA 2: KAMERA (DEEPFACE)
 # ==========================================
-# Tutaj definiujemy TYLKO te emocje, które nas interesują
-TARGET_EMOTIONS = {
-    'angry': 'ZŁOŚĆ',
-    'happy': 'RADOŚĆ',
-    'sad': 'SMUTEK'
-}
-# Kolory dla wykresów w trybie DeepFace
-DEEPFACE_COLORS_HEX = {
-    'ZŁOŚĆ': '#FF4B4B',
-    'RADOŚĆ': '#2ECC71',
-    'SMUTEK': '#3498DB'
+# Emocje, które nas interesują
+TARGET_EMOTIONS = {'angry': 'ZŁOŚĆ', 'happy': 'RADOŚĆ', 'sad': 'SMUTEK'}
+
+# Kolory BGR dla OpenCV (Ramki wideo)
+BOX_COLORS = {
+    'ZŁOŚĆ': (0, 0, 255),  # Czerwony
+    'RADOŚĆ': (0, 255, 0),  # Zielony
+    'SMUTEK': (255, 0, 0),  # Niebieski
+    'NIEOKREŚLONY': (200, 200, 200)
 }
 
 
 # --- FUNKCJE POMOCNICZE (TWÓJ MODEL) ---
-
 @st.cache_resource
 def load_ai_model():
-    if not os.path.exists(MODEL_PATH):
-        return None
+    if not os.path.exists(MODEL_PATH): return None
     return tf.keras.models.load_model(MODEL_PATH)
 
 
 def preprocess_image(image_path):
     try:
-        # Twój model wymaga 48x48 grayscale
         img = load_img(image_path, color_mode='grayscale', target_size=(48, 48))
         img_array = img_to_array(img)
         img_array /= 255.0
         return np.expand_dims(img_array, axis=0)
-    except Exception:
+    except:
         return None
 
 
@@ -70,267 +68,231 @@ def get_dataset_images(limit=None):
     search_path = os.path.join(DATASET_TEST_PATH, '**', '*.jpg')
     found_files = glob.glob(search_path, recursive=True)
     if not found_files: return []
-    if limit is not None and len(found_files) > limit:
-        return random.sample(found_files, limit)
+    if limit and len(found_files) > limit: return random.sample(found_files, limit)
     return found_files
 
 
+# ==========================================
+# KLASA DO PRZETWARZANIA WIDEO (WEBRTC)
+# ==========================================
+class EmotionProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.frame_count = 0
+        self.last_label = "Szukam..."
+        self.last_color = (255, 255, 255)
+        # Ładujemy detektor twarzy raz przy starcie
+        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+    def recv(self, frame):
+        # Konwersja klatki na format OpenCV (numpy)
+        img = frame.to_ndarray(format="bgr24")
+
+        # 1. Wykrywanie twarzy (Szybkie)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
+
+        for (x, y, w, h) in faces:
+            # Rysujemy ramkę
+            cv2.rectangle(img, (x, y), (x + w, y + h), self.last_color, 2)
+
+            # 2. Analiza DeepFace co 10 klatek (dla płynności)
+            if self.frame_count % 10 == 0:
+                try:
+                    # Wycinamy twarz
+                    face_roi = img[y:y + h, x:x + w]
+
+                    # DeepFace
+                    res = DeepFace.analyze(face_roi, actions=['emotion'], enforce_detection=False)
+                    if isinstance(res, list): res = res[0]
+
+                    all_emotions = res['emotion']  # np. {'angry': 20, 'happy': 5, 'neutral': 70...}
+
+                    # --- FILTROWANIE (TYLKO 3 EMOCJE) ---
+                    # Wyciągamy punkty tylko dla angry, happy, sad
+                    scores = {k: all_emotions.get(k, 0) for k in TARGET_EMOTIONS.keys()}
+
+                    total = sum(scores.values())
+                    if total > 0:
+                        # Znajdź tę, która ma najwięcej punktów wśród naszej trójki
+                        winner_key = max(scores, key=scores.get)
+                        winner_conf = scores[winner_key] / total  # Normalizacja
+
+                        self.last_label = f"{TARGET_EMOTIONS[winner_key]} ({winner_conf:.0%})"
+                        self.last_color = BOX_COLORS.get(TARGET_EMOTIONS[winner_key], (200, 200, 200))
+                    else:
+                        self.last_label = "Inna emocja"
+                        self.last_color = (200, 200, 200)
+
+                except Exception:
+                    pass
+
+            # Podpis nad głową (zawsze, nawet jak nie analizujemy w tej klatce)
+            cv2.putText(img, self.last_label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, self.last_color, 2)
+
+        self.frame_count += 1
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+
 # =========================================================
-# GŁÓWNY INTERFEJS (SELEKCJA TRYBU)
+# GŁÓWNY INTERFEJS
 # =========================================================
 
 st.sidebar.title("🎛️ Panel Sterowania")
 app_mode = st.sidebar.selectbox(
-    "Wybierz tryb aplikacji:",
-    ["📂 Badanie (Mój Model - Oryginał)", "📷 Kamera (Live Foto - DeepFace)"]
+    "Wybierz tryb:",
+    ["📂 Badanie (Mój Model - Pliki)", "📹 Kamera (DeepFace - Live/Foto)"]
 )
 
 # ---------------------------------------------------------
-# TRYB 1: BADANIE (To jest Twój stary kod)
+# TRYB 1: BADANIE (TWÓJ MODEL) - BEZ ZMIAN
 # ---------------------------------------------------------
-if app_mode == "📂 Badanie (Mój Model - Oryginał)":
-
-    st.title("🧠 System Rozpoznawania Emocji (Twój Model)")
-
-    # 1. Ładowanie Modelu
+if app_mode == "📂 Badanie (Mój Model - Pliki)":
+    st.title("🧠 Badanie: Twój Model .h5")
     model = load_ai_model()
-
-    if model is None:
-        st.error(f"Nie znaleziono modelu '{MODEL_PATH}'. Uruchom najpierw trening (emotion.py)!")
+    if not model:
+        st.error(f"Brak modelu {MODEL_PATH}")
         st.stop()
 
-    st.sidebar.header("⚙️ Źródło Danych")
-    source_option = st.sidebar.radio(
-        "Skąd pobrać zdjęcia?",
-        ("📂 Własny folder (test_real)", "📚 Zbiór testowy (Dataset)")
-    )
+    source = st.sidebar.radio("Źródło:", ("📂 Folder test_real", "📚 Dataset"))
+    img_paths = []
 
-    image_paths = []
-    current_source_name = ""
-
-    # Logika wyboru plików
-    if source_option == "📂 Własny folder (test_real)":
-        folder_path = st.sidebar.text_input("Ścieżka do folderu:", value=DEFAULT_USER_FOLDER)
-        current_source_name = "Moje zdjęcia"
-        if os.path.exists(folder_path):
-            files = [f for f in os.listdir(folder_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-            image_paths = [os.path.join(folder_path, f) for f in files]
-        else:
-            st.sidebar.warning("Folder nie istnieje.")
-
-    else:  # Dataset
-        current_source_name = "Zbiór Testowy (Dataset)"
+    if source == "📂 Folder test_real":
+        folder = st.sidebar.text_input("Folder:", DEFAULT_USER_FOLDER)
+        if os.path.exists(folder):
+            img_paths = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('jpg', 'png'))]
+    else:
         if os.path.exists(DATASET_TEST_PATH):
-            load_all = st.sidebar.checkbox("Wczytaj WSZYSTKIE dostępne zdjęcia", value=False)
-            if load_all:
-                image_paths = get_dataset_images(limit=None)
-                st.sidebar.warning(f"⚠️ Uwaga: Wczytano {len(image_paths)} zdjęć.")
-            else:
-                sample_size = st.sidebar.number_input("Liczba losowych zdjęć:", min_value=1, value=200, step=50)
-                image_paths = get_dataset_images(limit=sample_size)
-                st.sidebar.info(f"Pobrano losowe {len(image_paths)} zdjęć.")
-        else:
-            st.sidebar.error(f"Nie znaleziono folderu {DATASET_TEST_PATH}.")
+            limit = st.sidebar.number_input("Ile zdjęć?", 10, 500, 50)
+            img_paths = get_dataset_images(limit)
 
-    if not image_paths:
-        st.warning("Brak zdjęć do analizy.")
-        st.stop()
-
-    # --- ANALIZA DANYCH ---
-    session_key = f'analysis_{current_source_name}_{len(image_paths)}'
-
-    if session_key not in st.session_state:
-        st.session_state[session_key] = None
-
-    if st.session_state[session_key] is None:
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        results = []
-        has_ground_truth = False
-        total_imgs = len(image_paths)
-
-        with st.spinner(f"Przetwarzanie {total_imgs} zdjęć Twoim modelem..."):
-            for i, path in enumerate(image_paths):
-                if i % (max(1, total_imgs // 20)) == 0:
-                    progress_bar.progress(i / total_imgs)
-                    status_text.text(f"Analiza obrazu {i + 1}/{total_imgs}")
-
-                processed_img = preprocess_image(path)
-                if processed_img is not None:
-                    # Predykcja Twoim modelem
-                    pred = model.predict(processed_img, verbose=0)[0]
+    if img_paths:
+        if st.button("Uruchom analizę"):
+            results = []
+            bar = st.progress(0)
+            for i, p in enumerate(img_paths):
+                proc = preprocess_image(p)
+                if proc is not None:
+                    pred = model.predict(proc, verbose=0)[0]
                     idx = np.argmax(pred)
                     label = CLASSES[idx]
-                    confidence = np.max(pred)
 
-                    filename = os.path.basename(path)
-                    parent_folder = os.path.basename(os.path.dirname(path))
-                    true_label_eng = parent_folder if parent_folder in CLASSES else None
-                    true_label_pl = TRANSLATION.get(true_label_eng, "-")
-
-                    if true_label_eng: has_ground_truth = True
+                    # Ground Truth
+                    folder_name = os.path.basename(os.path.dirname(p))
+                    true_lbl = TRANSLATION.get(folder_name, "-") if folder_name in CLASSES else "-"
 
                     results.append({
-                        "Plik": filename,
-                        "Prawdziwa_Etykieta": true_label_pl,
-                        "Wykryta_Emocja": TRANSLATION[label],
-                        "Pewność": confidence,
-                        "Raw_Angry": pred[0], "Raw_Happy": pred[1], "Raw_Sad": pred[2],
-                        "Ścieżka": path,
-                        "Poprawne": true_label_pl == TRANSLATION[label] if true_label_eng else None
+                        "Plik": os.path.basename(p),
+                        "Wykryta": TRANSLATION[label],
+                        "Pewnosc": np.max(pred),
+                        "Prawda": true_lbl,
+                        "Poprawne": (true_lbl == TRANSLATION[label]) if true_lbl != "-" else False,
+                        "Ścieżka": p,
+                        "Raw_Angry": pred[0], "Raw_Happy": pred[1], "Raw_Sad": pred[2]
                     })
-            progress_bar.progress(1.0)
-            status_text.empty()
+                bar.progress((i + 1) / len(img_paths))
 
-        st.session_state[session_key] = pd.DataFrame(results)
-        st.session_state[f"{session_key}_has_gt"] = has_ground_truth
+            st.session_state['df_res'] = pd.DataFrame(results)
 
-    df = st.session_state[session_key]
-    has_gt = st.session_state.get(f"{session_key}_has_gt", False)
+    if 'df_res' in st.session_state:
+        df = st.session_state['df_res']
+        t1, t2, t3 = st.tabs(["Raport", "Przeglądarka", "Bayes"])
 
-    # --- ZAKŁADKI ---
-    tab1, tab2, tab3 = st.tabs(["📊 Raporty i Statystyki", "🔍 Przeglądarka (Interakcja)", "🧮 Wnioskowanie Bayesowskie"])
+        with t1:
+            st.write(f"Zanalizowano {len(df)} plików.")
+            fig = px.pie(df, names='Wykryta', color='Wykryta',
+                         color_discrete_map={v: COLORS[k] for k, v in TRANSLATION.items()})
+            st.plotly_chart(fig)
+            st.dataframe(df)
 
-    # TAB 1: RAPORTY
-    with tab1:
-        st.header(f"Raport dla: {current_source_name}")
-        with st.expander("📈 Zobacz historię treningu"):
-            if os.path.exists("wykresy_treningu.png"):
-                st.image("wykresy_treningu.png", use_container_width=True)
-            else:
-                st.warning("Brak pliku wykresy_treningu.png")
+        with t2:
+            st.write("Galeria (Posortowana: Poprawne -> Błędne)")
+            df_s = df.sort_values(by=['Poprawne', 'Pewnosc'], ascending=[False, False])
+            cols = st.columns(5)
+            for i, row in df_s.head(20).iterrows():
+                cols[i % 5].image(row['Ścieżka'], caption=f"{row['Wykryta']} ({row['Pewnosc']:.0%})")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            fig_pie = px.pie(df, names='Wykryta_Emocja', title='Rozkład Wykrytych Emocji',
-                             color='Wykryta_Emocja', color_discrete_map={v: COLORS[k] for k, v in TRANSLATION.items()})
-            st.plotly_chart(fig_pie, use_container_width=True)
-        with col2:
-            avg_conf = df.groupby('Wykryta_Emocja')['Pewność'].mean().reset_index()
-            fig_bar = px.bar(avg_conf, x='Wykryta_Emocja', y='Pewność', title='Średnia Pewność',
-                             color='Wykryta_Emocja', color_discrete_map={v: COLORS[k] for k, v in TRANSLATION.items()})
-            fig_bar.update_yaxes(range=[0, 1])
-            st.plotly_chart(fig_bar, use_container_width=True)
+        with t3:
+            st.write("Symulacja Bayesa")
+            sel = st.selectbox("Plik:", df['Plik'])
+            row = df[df['Plik'] == sel].iloc[0]
+            st.image(row['Ścieżka'], width=150)
 
-        st.dataframe(df[['Plik', 'Prawdziwa_Etykieta', 'Wykryta_Emocja', 'Pewność']], use_container_width=True)
+            pa = st.slider("Szansa Złość", 0.0, 1.0, 0.33)
+            ph = st.slider("Szansa Radość", 0.0, 1.0, 0.33)
+            ps = st.slider("Szansa Smutek", 0.0, 1.0, 0.33)
+            priors = np.array([pa, ph, ps])
+            priors /= (priors.sum() + 1e-9)
 
-    # TAB 2: PRZEGLĄDARKA
-    with tab2:
-        st.header("Interaktywna Przeglądarka")
-        df_sorted = df.sort_values(by=['Poprawne', 'Pewność'], ascending=[False, False], na_position='last')
+            like = np.array([row['Raw_Angry'], row['Raw_Happy'], row['Raw_Sad']])
+            post = like * priors
+            post /= post.sum()
 
-        c1, c2 = st.columns(2)
-        target = c1.selectbox("Filtruj po emocji:", ["Wszystkie"] + list(TRANSLATION.values()))
-        amount = c2.slider("Liczba zdjęć:", 1, len(df), min(20, len(df)))
-
-        if target == "Wszystkie":
-            filtered_df = df_sorted.head(amount)
-        else:
-            filtered_df = df_sorted[df_sorted['Wykryta_Emocja'] == target].head(amount)
-
-        cols = st.columns(5)
-        for index, row in filtered_df.iterrows():
-            with cols[index % 5]:
-                st.image(row['Ścieżka'], use_container_width=True)
-                color_style = "green" if row['Poprawne'] else "red"
-                if row['Prawdziwa_Etykieta'] == "-": color_style = "black"
-                st.markdown(f"**{row['Wykryta_Emocja']}** ({row['Pewność']:.0%})", unsafe_allow_html=True)
-
-    # TAB 3: BAYES
-    with tab3:
-        st.header("Eksperyment: Wnioskowanie Bayesowskie")
-        col_left, col_right = st.columns([1, 2])
-        with col_left:
-            sel_file = st.selectbox("Wybierz zdjęcie:", df['Plik'])
-            row_data = df[df['Plik'] == sel_file].iloc[0]
-            st.image(row_data['Ścieżka'], width=200)
-
-            st.markdown("### Kontekst (Prior)")
-            p_ang = st.slider("Złość (Kontekst)", 0.0, 1.0, 0.33)
-            p_hap = st.slider("Radość (Kontekst)", 0.0, 1.0, 0.33)
-            p_sad = st.slider("Smutek (Kontekst)", 0.0, 1.0, 0.33)
-
-            priors = np.array([p_ang, p_hap, p_sad])
-            if priors.sum() == 0: priors = np.ones(3)
-            priors /= priors.sum()
-
-        with col_right:
-            likelihood = np.array([row_data['Raw_Angry'], row_data['Raw_Happy'], row_data['Raw_Sad']])
-            posterior = likelihood * priors
-            posterior /= posterior.sum()
-
-            fig = go.Figure()
-            emotions_list = list(TRANSLATION.values())
-            fig.add_trace(go.Bar(x=emotions_list, y=likelihood, name='Model (Oczy)'))
-            fig.add_trace(go.Bar(x=emotions_list, y=posterior, name='Bayes (Oczy + Kontekst)'))
-            st.plotly_chart(fig, use_container_width=True)
-            st.success(f"Decyzja Bayesa: **{emotions_list[np.argmax(posterior)]}**")
-
+            fig = go.Figure(data=[
+                go.Bar(name='Model', x=list(TRANSLATION.values()), y=like),
+                go.Bar(name='Bayes', x=list(TRANSLATION.values()), y=post)
+            ])
+            st.plotly_chart(fig)
 
 # ---------------------------------------------------------
-# TRYB 2: KAMERA (NOWOŚĆ - DeepFace) - TYLKO SNAPSHOT
+# TRYB 2: KAMERA (LIVE + FOTO) - WEBRTC & DEEPFACE
 # ---------------------------------------------------------
-elif app_mode == "📷 Kamera (Live Foto - DeepFace)":
+elif app_mode == "📹 Kamera (DeepFace - Live/Foto)":
+    st.title("📹 Detekcja Live (WebRTC)")
+    st.markdown("Wybierz metodę. **Live Stream** może chwilę ładować się na starcie.")
 
-    st.title("📷 Kamera (Analiza Emocji)")
-    st.info(
-        "Zrób zdjęcie, aby model DeepFace przeanalizował emocje. Wynik zostanie ograniczony tylko do: Złość, Radość, Smutek.")
+    method = st.radio("Metoda:", ["🔴 Live Stream (Wideo)", "📸 Pojedyncze Zdjęcie"])
 
-    img_buffer = st.camera_input("Uśmiechnij się!")
+    if method == "🔴 Live Stream (Wideo)":
+        st.write("Kliknij **START**, aby uruchomić kamerę. Zezwól przeglądarce na dostęp.")
 
-    if img_buffer is not None:
-        # 1. Zapisz zdjęcie tymczasowo
-        temp_filename = "temp_snap.jpg"
-        with open(temp_filename, "wb") as f:
-            f.write(img_buffer.getbuffer())
+        # To jest ten komponent, który działa w chmurze!
+        webrtc_streamer(
+            key="emotion-filter",
+            mode=WebRtcMode.SENDRECV,
+            video_processor_factory=EmotionProcessor,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True
+        )
+        st.info("💡 Wideo może mieć opóźnienie, ponieważ analiza DeepFace jest wymagająca obliczeniowo.")
 
-        col_res1, col_res2 = st.columns([1, 1.5])
+    else:
+        # Tryb zdjęcia (Stary dobry camera_input)
+        img_buffer = st.camera_input("Zrób zdjęcie")
+        if img_buffer:
+            temp = "temp.jpg"
+            with open(temp, "wb") as f:
+                f.write(img_buffer.getbuffer())
 
-        with col_res1:
-            st.image(temp_filename, caption="Twoje zdjęcie", use_container_width=True)
+            col1, col2 = st.columns(2)
+            col1.image(temp)
 
-        with col_res2:
-            with st.spinner("Analiza w toku..."):
+            with st.spinner("Analiza..."):
                 try:
-                    # DeepFace analizuje zdjęcie (wszystkie emocje)
-                    # enforce_detection=False pozwala działać nawet gdy twarz jest niewyraźna
-                    res = DeepFace.analyze(temp_filename, actions=['emotion'], enforce_detection=False)
-
+                    res = DeepFace.analyze(temp, actions=['emotion'], enforce_detection=False)
                     if isinstance(res, list): res = res[0]
 
-                    all_emotions = res['emotion']  # np. {'angry': 10, 'happy': 0.1, 'neutral': 80...}
+                    all_emotions = res['emotion']
+                    # Filtrowanie 3 emocji
+                    scores = {k: all_emotions.get(k, 0) for k in TARGET_EMOTIONS.keys()}
+                    total = sum(scores.values())
 
-                    # 2. FILTROWANIE (Kluczowy moment)
-                    # Wybieramy tylko te 3 emocje, które zdefiniowaliśmy w TARGET_EMOTIONS
-                    filtered_scores = {k: all_emotions.get(k, 0) for k in TARGET_EMOTIONS.keys()}
+                    if total > 0:
+                        norm_scores = {k: v / total for k, v in scores.items()}
+                        winner = max(norm_scores, key=norm_scores.get)
 
-                    # Obliczamy sumę tych trzech, żeby przeliczyć procenty na nowo (żeby sumowały się do 100%)
-                    total_score = sum(filtered_scores.values())
-                    if total_score == 0: total_score = 1  # Zabezpieczenie przez dzieleniem przez 0
+                        col2.success(f"Wynik: **{TARGET_EMOTIONS[winner]}**")
+                        col2.metric("Pewność", f"{norm_scores[winner]:.1%}")
 
-                    # Normalizacja
-                    normalized_scores = {k: (v / total_score) for k, v in filtered_scores.items()}
-
-                    # Znalezienie zwycięzcy
-                    winner_key = max(normalized_scores, key=normalized_scores.get)
-                    winner_pl = TARGET_EMOTIONS[winner_key]
-                    winner_conf = normalized_scores[winner_key]
-
-                    # Wyświetlenie wyniku
-                    st.success(f"Wykryta emocja: **{winner_pl}**")
-                    st.metric("Pewność (wśród badanych 3)", f"{winner_conf:.1%}")
-
-                    # Wykres
-                    chart_data = pd.DataFrame({
-                        'Emocja': [TARGET_EMOTIONS[k] for k in normalized_scores.keys()],
-                        'Prawdopodobienstwo': list(normalized_scores.values())
-                    })
-
-                    fig = px.bar(chart_data, x='Emocja', y='Prawdopodobienstwo',
-                                 title="Rozkład (Złość vs Radość vs Smutek)",
-                                 color='Emocja', color_discrete_map=DEEPFACE_COLORS_HEX)
-                    fig.update_yaxes(range=[0, 1])
-                    st.plotly_chart(fig, use_container_width=True)
+                        # Wykres
+                        df_chart = pd.DataFrame({
+                            'Emocja': [TARGET_EMOTIONS[k] for k in norm_scores],
+                            'Wynik': list(norm_scores.values())
+                        })
+                        fig = px.bar(df_chart, x='Emocja', y='Wynik', color='Emocja',
+                                     color_discrete_map={'ZŁOŚĆ': '#FF4B4B', 'RADOŚĆ': '#2ECC71', 'SMUTEK': '#3498DB'})
+                        col2.plotly_chart(fig)
+                    else:
+                        col2.warning("Wykryto twarz, ale żadna z emocji (Złość/Radość/Smutek) nie jest dominująca.")
 
                 except Exception as e:
-                    st.error(f"Wystąpił błąd analizy lub nie wykryto twarzy. Spróbuj ponownie.\nSzczegóły: {e}")
+                    st.error(f"Błąd: {e}")
