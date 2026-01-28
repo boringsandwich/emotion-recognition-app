@@ -1,5 +1,8 @@
 streamlit
-tensorflow-cpu
+tensorflow
+deepface
+tf-keras
+opencv-python-headless
 pandas
 numpy
 plotly
